@@ -1,0 +1,248 @@
+#!/bin/bash
+VERSION=0.1
+#
+# Configure script for CMAKE projects
+#
+# Copyright (C) 2016  Michael Augustin
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# 
+#
+VERBOSE=0
+SCRIPT=$(basename $0)
+CWD=$(pwd -P)
+#set -x
+function usage {
+    cat <<EOF
+    Configure CMAKE project in GNU configure style
+    Version: $VERSION
+    ========================================================================== 
+    This tool is intended to setup a build dir in your workarea.
+         
+    usage: $SCRIPT [options]
+        
+    options:
+        --build <dir>         : build directory (default build/host_target)
+        --prefix <dir>        : install directory
+        --host <buildhost>    : name of the host system (default guessed with uname)
+        --target <buildtarget>: name of the target system (default the host system)
+        --enable-<FEATURE>
+        --disable-<FEATURE>   : switch some build feature on
+        --cmakedir <dir>      : directory with CMakeLists.txt (default current dir)
+        --cmakegen <generator>: cmake generator (default Ninja)
+        -v                    : verbose output
+    
+    Configure CMAKE project - Copyright (C) 2016  Michael Augustin
+    Feel free to contact me via mail <maugustin (at) gmx (dot) net>
+    
+    This program comes with ABSOLUTELY NO WARRANTY.
+    This is free software, and you are welcome to redistribute it
+    under certain conditions.
+EOF
+
+};
+
+function loginfo
+{
+    echo "$*"
+}
+
+function debug
+{
+    if [ $VERBOSE -ge 1 ]; then
+        echo "$*" >&2
+    fi
+}
+
+function debug2
+{
+    if [ $VERBOSE -ge 2 ]; then
+        echo "$*" >&2
+    fi
+}
+
+function error
+{
+    echo "ERROR: $*" >&2
+}
+
+#set -x
+set -e
+export LC_ALL=C
+
+VERBOSE=0
+CMAKEARG=0
+CMAKEARGS=
+HOST=
+BUILDDIR=
+TARGET=
+INSTALLDIR=
+CONFIGFEATURES=
+CMAKEDIR=.
+GENERATOR=Ninja
+NO_INSTALL=0
+NO_PACKAGE=0
+
+# Check for necessary tools
+if type -p cmake >/dev/null; then
+    CMAKE=cmake
+else
+    error "cmake not found! Abort!"
+    exit 1
+fi
+
+SORT=${SORT:-sort}
+FIND=${FIND:-find}
+SED=${SED:-sed}
+
+ARGS=$*
+# Parse arguments
+while [ $# -ge 1 ]; do
+    case $1 in
+        -v) VERBOSE=$[ $VERBOSE + 1 ];;
+        -h|--help) usage; exit 1;;
+        --host) HOST=$2; shift;;
+        --target) TARGET=$2; shift;;
+        --build) BUILDDIR=$2; shift;;
+        --prefix) INSTALLDIR=$2; CMAKEARGS="$CMAKEARGS -DINSTALLDIR=$INSTALLDIR"; shift;;
+        --cmakedir) CMAKEDIR=$2; shift;;
+        --cmakegen) GENERATOR="$2"; shift;;
+        --enable-*) ARG=$1; FEATURE="HAS_${ARG/--enable-/}"; CONFIGFEATURES="$CONFIGFEATURES -D$FEATURE=1";;
+        --disable-*) ARG=$1; FEATURE="HAS_${ARG/--disable-/}"; CONFIGFEATURES="$CONFIGFEATURES -D$FEATURE=0";;
+        --with-*) ARG=$1; FEATURE="HAS_${ARG/--with-/}"; CONFIGFEATURES="$CONFIGFEATURES -D$FEATURE=1";;
+        --without-install) NO_INSTALL=1;;
+        --without-package) NO_PACKAGE=1;;
+        --without-*) ARG=$1; FEATURE="HAS_${ARG/--without-/}"; CONFIGFEATURES="$CONFIGFEATURES -D$FEATURE=0";;
+        --) CMAKEARG=1;;
+        *) [ "$CMAKEARG" -eq "1" ] && CMAKEARGS="$CMAKEARGS $1" || echo "Unknown arguments $1";;
+    esac
+    shift
+done
+
+if [ $VERBOSE -gt 2 ]; then
+        set -x
+fi
+
+# HOST detection
+if [ "$HOST" = "" ]; then
+    HOST="$(uname -s)"
+else
+    CMAKEARGS="$CMAKEARGS -DBUILD_HOST=$HOST"
+fi
+
+if [ "$TARGET" = "" ]; then
+    TARGET="$HOST"
+else
+    CMAKEARGS="$CMAKEARGS -DBUILD_TARGET=$TARGET"
+fi
+TARGETLOW=$(echo "$TARGET" | tr 'A-Z' 'a-z')
+
+if [ "$BUILDDIR" = "" ]; then
+    BUILDDIR="build/${HOST}_${TARGET}"
+fi
+if [ ! -d "$BUILDDIR" ]; then
+    mkdir -p "$BUILDDIR"
+fi
+CMAKEDIRABS="$(cd $CMAKEDIR && pwd -P)"
+BUILDDIRABS="$(cd $BUILDDIR && pwd -P)"
+ROOTDIRABS="$(pwd -P)"
+
+# change to builddir
+cd $BUILDDIR
+
+# create cmake reconfigure script
+cat >run_reconfigure.sh <<EOFCONFIGURE
+#!/bin/bash
+cd \$(dirname \$0)
+if [ -f "$ROOTDIRABS/setenv.sh" ]; then
+    . "$ROOTDIRABS/setenv.sh"
+fi
+cd $CWD
+exec ./$(basename $0) $ARGS \$*
+EOFCONFIGURE
+
+if [ -f "$ROOTDIRABS/setenv.sh" ]; then
+    . "$ROOTDIRABS/setenv.sh"
+fi
+
+rm -f CMakeCache.txt run_build.sh run_install.sh run_package.sh
+
+if [ -f "$ROOTDIRABS/build_$TARGET.sh" ]; then
+    export BUILDDIR="$BUILDDIRABS"
+    \$SHELL "$ROOTDIRABS/build_$TARGET.sh" $CMAKEARGS $CONFIGFEATURES \$* $CMAKEDIRABS
+elif [ -f "$ROOTDIRABS/build_$TARGETLOW.sh" ]; then
+    export BUILDDIR="$BUILDDIRABS"
+    \$SHELL "$ROOTDIRABS/build_$TARGETLOW.sh" $CMAKEARGS $CONFIGFEATURES \$* $CMAKEDIRABS
+fi
+if [ ! -f CMakeCache.txt ]; then
+    echo "$CMAKE -G\"$GENERATOR\" $CMAKEARGS $CONFIGFEATURES \$* $CMAKEDIRABS"
+    $CMAKE -G"$GENERATOR" $CMAKEARGS $CONFIGFEATURES \$* $CMAKEDIRABS
+fi
+
+# create run_build.sh
+if [ ! -f run_build.sh ]; then
+cat >run_build.sh <<EOF
+#!/bin/bash
+cd \$(dirname \$0)
+if [ -f "$ROOTDIRABS/setenv.sh" ]; then
+    . "$ROOTDIRABS/setenv.sh"
+fi
+
+BUILDTARGET="\$1"
+ARG=
+if [ "\${BUILDTARGET:0:1}" != "-" ]; then
+  ARG="--target"
+fi
+$CMAKE --build . \$ARG \$* 
+EOF
+fi
+
+# create run_install.sh
+if [ ! -f run_install.sh -a $NO_INSTALL -eq 0 ]; then
+cat >run_install.sh <<EOF
+#!/bin/bash
+cd \$(dirname \$0)
+if [ -f "$ROOTDIRABS/setenv.sh" ]; then
+    . "$ROOTDIRABS/setenv.sh"
+fi
+if [ "$INSTALLDIR" != "" ]; then
+    $CMAKE --build . --target install $*
+else
+    loginfo "No INSTALLDIR for installation step defined (option --prefix)."
+fi
+
+EOF
+fi
+
+# create run_package.sh
+if [ ! -f run_package.sh -a $NO_PACKAGE -eq 0 ]; then
+cat >run_package.sh <<EOF
+#!/bin/bash
+cd \$(dirname \$0)
+if [ -f "$ROOTDIRABS/setenv.sh" ]; then
+    . "$ROOTDIRABS/setenv.sh"
+fi
+
+$CMAKE --build . --target package $* 
+EOF
+fi
+
+# make all executable
+chmod +x run_*.sh
+
+# finished message
+loginfo ""
+loginfo "Finished configure script run in $BUILDDIR"
+loginfo "Next step to build software: ./run_build.sh"
+loginfo "To refresh cmake project output: ./run_reconfigure.sh"
